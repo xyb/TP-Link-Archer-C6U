@@ -82,11 +82,40 @@ class TPLinkXDRClient(AbstractRouter):
         )
         try:
             data = response.json()
+        except ValueError:
+            body = (response.text or '').strip()
+            snippet = body[:300] + ('…' if len(body) > 300 else '')
+            hint = ''
+            if response.status_code in (502, 503, 504):
+                hint = (' Likely cause: router rate-limited the login endpoint after '
+                        'too-many-attempts (returns HTML instead of JSON). Wait ~5-10 minutes.')
+            raise ClientException(
+                'TplinkRouter - {} - Cannot authorize! HTTP {} {} (non-JSON body: {!r}){}'.format(
+                    self.__class__.__name__, response.status_code,
+                    response.reason or '', snippet, hint))
+        if not isinstance(data, dict):
+            raise ClientException(
+                'TplinkRouter - {} - Cannot authorize! Unexpected response shape: {!r}'.format(
+                    self.__class__.__name__, data))
+        err = data.get('error_code')
+        if err == -40401:
+            d = data.get('data') or {}
+            raise ClientException(
+                'TplinkRouter - {} - Cannot authorize! error_code=-40401 password attempts {}/{}: '
+                'router will permanently lock after limit. Verify the password is correct before '
+                'retrying. Web UI login does NOT reset this counter — wait for the lockout window '
+                'to expire (max_time={}s).'.format(
+                    self.__class__.__name__, d.get('time'), d.get('max_time'), d.get('max_time')))
+        if err not in (0, None):
+            raise ClientException(
+                'TplinkRouter - {} - Cannot authorize! error_code={} body={!r}'.format(
+                    self.__class__.__name__, err, data))
+        try:
             self._stok = data['stok']
-        except Exception as e:
-            error = ('TplinkRouter - {} - Cannot authorize! Error - {}; Response - {}'.
-                     format(self.__class__.__name__, e, response))
-            raise ClientException(error)
+        except KeyError:
+            raise ClientException(
+                'TplinkRouter - {} - Cannot authorize! response missing stok: {!r}'.format(
+                    self.__class__.__name__, data))
 
     def logout(self) -> None:
         data = self._request({
